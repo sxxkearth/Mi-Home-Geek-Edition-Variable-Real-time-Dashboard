@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         米家极客版变量实时看板
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  修复左下角缩放方向，首次打开自适应浏览器窗口，尺寸变化自动适配列数
+// @version      2.3
+// @description  拖拽缩放+手动列数/字体+主题切换+搜索过滤，优化主题切换速度
 // @author       嗜血星空earth
 // @match        http://192.168.*/*
 // @match        http://*/*
@@ -17,23 +17,62 @@
     let changedCellSet = new Set();
     let panelVisible = false;
 
-    // 面板拖动
+    let manualColumnCount = null;
+    let baseFontSize = 12;
+    let isDarkTheme = true;
+
     let isDragging = false;
     let startX = 0, startY = 0;
     let initLeft = 0, initTop = 0;
 
-    // 缩放状态
-    let isResizeBL = false; // 左下角
-    let isResizeBR = false; // 右下角
+    let isResizeBL = false;
+    let isResizeBR = false;
     let resizeStartX = 0, resizeStartY = 0;
     let initW = 0, initH = 0;
     let initPanelLeft = 0;
 
     const MIN_W = 400;
     const MIN_H = 300;
+    const MIN_COL = 1;
+    const MAX_COL = 12;
+    const MIN_FONT = 10;
+    const MAX_FONT = 20;
 
-    // 自动列数：根据面板宽度
+    // 搜索关键词
+    let searchKeyword = '';
+
+    // 预定义两套主题色彩，快速取值
+    const themeColor = {
+        dark: {
+            panelBg: "#1f2937",
+            border: "#444",
+            titleBarBg: "#2d3748",
+            titleText: "#fff",
+            resizeBg: "#4a5568",
+            cellBorder: "#555",
+            text: "#fff",
+            emptyText: "#888",
+            changeBg: "#4b2828",
+            headBg: "#334",
+            titleMark: "#73c0ff"
+        },
+        light: {
+            panelBg: "#ffffff",
+            border: "#ddd",
+            titleBarBg: "#f5f5f5",
+            titleText: "#333",
+            resizeBg: "#eee",
+            cellBorder: "#ddd",
+            text: "#333",
+            emptyText: "#aaa",
+            changeBg: "#ffebee",
+            headBg: "#f0f0f0",
+            titleMark: "#0066cc"
+        }
+    };
+
     function getAutoColumnCount() {
+        if (manualColumnCount !== null) return manualColumnCount;
         const panelW = panel ? panel.offsetWidth : window.innerWidth;
         if (panelW < 500) return 2;
         if (panelW < 800) return 4;
@@ -41,12 +80,11 @@
         return 8;
     }
 
-    // 首次打开：面板大小自适应浏览器可视区
     function getInitialPanelSize() {
-        const w = Math.max(MIN_W, Math.floor(window.innerWidth * 0.8));
-        const h = Math.max(MIN_H, Math.floor(window.innerHeight * 0.8));
+        const w = Math.max(MIN_W, Math.floor(window.innerWidth * 1.0));
+        const h = Math.max(MIN_H, Math.floor(window.innerHeight * 0.93));
         const left = Math.floor((window.innerWidth - w) / 2);
-        const top = Math.floor((window.innerHeight - h) / 2);
+        const top = Math.floor((window.innerHeight - h)/10);
         return { w, h, left, top };
     }
 
@@ -83,29 +121,88 @@
 
     let panel = null, btn = null, isShow = false;
     let titleBar = null, resizeBL = null, resizeBR = null;
+    let searchInput = null;
+    let btnWrap;
+    let controlBtns = [];
 
     function createUI() {
         if (typeof document === 'undefined') return;
 
+        btnWrap = document.createElement('div');
+        btnWrap.style.cssText = `
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            z-index: 99999999;
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        `;
+
         btn = document.createElement('button');
         btn.innerText = "变量看板";
         btn.style.cssText = `
-            position: fixed !important;
-            right: 20px !important;
-            bottom: 20px !important;
-            z-index: 99999999 !important;
-            padding: 12px 10px !important;
-            background: #1677ff !important;
-            color: white !important;
-            border: none !important;
-            border-radius: 6px !important;
-            font-size: 14px !important;
-            cursor: pointer !important;
+            padding: 8px 10px;
+            background: #1677ff;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
             user-select: none;
         `;
 
-        const initSize = getInitialPanelSize();
+        const btnColAdd = document.createElement('button');
+        btnColAdd.innerText = "列数+";
+        btnColAdd.style.cssText = btn.style.cssText;
+        btnColAdd.style.display = "none";
+        btnColAdd.onclick = () => {
+            manualColumnCount = Math.min((manualColumnCount || getAutoColumnCount()) + 1, MAX_COL);
+            refreshVars();
+        };
 
+        const btnColSub = document.createElement('button');
+        btnColSub.innerText = "列数-";
+        btnColSub.style.cssText = btn.style.cssText;
+        btnColSub.style.display = "none";
+        btnColSub.onclick = () => {
+            manualColumnCount = Math.max((manualColumnCount || getAutoColumnCount()) - 1, MIN_COL);
+            refreshVars();
+        };
+
+        const btnFontAdd = document.createElement('button');
+        btnFontAdd.innerText = "字体+";
+        btnFontAdd.style.cssText = btn.style.cssText;
+        btnFontAdd.style.display = "none";
+        btnFontAdd.onclick = () => {
+            baseFontSize = Math.min(baseFontSize + 1, MAX_FONT);
+            refreshVars();
+        };
+
+        const btnFontSub = document.createElement('button');
+        btnFontSub.innerText = "字体-";
+        btnFontSub.style.cssText = btn.style.cssText;
+        btnFontSub.style.display = "none";
+        btnFontSub.onclick = () => {
+            baseFontSize = Math.max(baseFontSize - 1, MIN_FONT);
+            refreshVars();
+        };
+
+        const btnTheme = document.createElement('button');
+        btnTheme.innerText = "主题";
+        btnTheme.style.cssText = btn.style.cssText;
+        btnTheme.style.display = "none";
+        btnTheme.onclick = () => {
+            isDarkTheme = !isDarkTheme;
+            applyTheme();
+            refreshVars();
+        };
+
+        controlBtns = [btnColAdd, btnColSub, btnFontAdd, btnFontSub, btnTheme];
+        btnWrap.append(btn, ...controlBtns);
+        document.body.appendChild(btnWrap);
+
+        const initSize = getInitialPanelSize();
         panel = document.createElement('div');
         panel.style.cssText = `
             position: fixed !important;
@@ -117,29 +214,55 @@
             max-height: calc(100% - 20px) !important;
             min-width: ${MIN_W}px !important;
             min-height: ${MIN_H}px !important;
-            background: #1f2937 !important;
             color: #fff !important;
             padding: 0 !important;
             border-radius: 8px !important;
             z-index: 99999998 !important;
             display: none !important;
             overflow: hidden !important;
-            font-size: 12px !important;
             box-sizing: border-box !important;
             border: 1px solid #444;
         `;
 
+        // 标题栏 + 搜索框容器
         titleBar = document.createElement('div');
         titleBar.style.cssText = `
             height: 36px !important;
             line-height: 36px !important;
             padding: 0 12px !important;
-            background: #2d3748 !important;
             border-bottom: 1px solid #444 !important;
             cursor: move !important;
             user-select: none;
+            font-size: 14px;
+            display: flex !important;
+            justify-content: space-between !important;
+            align-items: center !important;
         `;
-        titleBar.innerText = "米家极客版变量实时看板  ©嗜血星空earth";
+
+        const titleText = document.createElement('span');
+        titleText.innerText = "米家极客版变量实时看板  ©嗜血星空earth";
+
+        // 搜索输入框
+        searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = '搜索变量名...';
+        searchInput.style.cssText = `
+            height: 24px !important;
+            padding: 0 8px !important;
+            border-radius: 4px !important;
+            border: 1px solid #ccc !important;
+            outline: none !important;
+            font-size: 12px !important;
+            width: 160px !important;
+        `;
+        // 搜索输入实时刷新
+        searchInput.addEventListener('input', () => {
+            searchKeyword = searchInput.value.trim().toLowerCase();
+            refreshVars();
+        });
+
+        titleBar.appendChild(titleText);
+        titleBar.appendChild(searchInput);
 
         const contentWrap = document.createElement('div');
         contentWrap.id = "var-list-content";
@@ -154,7 +277,6 @@
         `;
         contentWrap.innerHTML = "加载中...";
 
-        // 左下角缩放
         resizeBL = document.createElement('div');
         resizeBL.style.cssText = `
             position: absolute !important;
@@ -162,12 +284,10 @@
             bottom: 0 !important;
             width: 16px !important;
             height: 16px !important;
-            background: #4a5568 !important;
             cursor: sw-resize !important;
             border-radius: 0 0 0 8px;
         `;
 
-        // 右下角缩放
         resizeBR = document.createElement('div');
         resizeBR.style.cssText = `
             position: absolute !important;
@@ -175,7 +295,6 @@
             bottom: 0 !important;
             width: 16px !important;
             height: 16px !important;
-            background: #4a5568 !important;
             cursor: se-resize !important;
             border-radius: 0 0 8px 0;
         `;
@@ -184,12 +303,12 @@
         panel.appendChild(contentWrap);
         panel.appendChild(resizeBL);
         panel.appendChild(resizeBR);
-
-        document.body.appendChild(btn);
         document.body.appendChild(panel);
+        applyTheme();
 
-        // 拖动
         titleBar.addEventListener('mousedown', (e) => {
+            // 点击搜索框时不触发拖拽
+            if (e.target === searchInput) return;
             isDragging = true;
             startX = e.clientX;
             startY = e.clientY;
@@ -199,7 +318,6 @@
             e.preventDefault();
         });
 
-        // 左下角缩放
         resizeBL.addEventListener('mousedown', (e) => {
             isResizeBL = true;
             resizeStartX = e.clientX;
@@ -212,7 +330,6 @@
             e.stopPropagation();
         });
 
-        // 右下角缩放
         resizeBR.addEventListener('mousedown', (e) => {
             isResizeBR = true;
             resizeStartX = e.clientX;
@@ -225,7 +342,6 @@
         });
 
         document.addEventListener('mousemove', (e) => {
-            // 拖动
             if (isDragging) {
                 const dx = e.clientX - startX;
                 const dy = e.clientY - startY;
@@ -238,8 +354,6 @@
                 panel.style.right = "auto";
                 return;
             }
-
-            // 右下角缩放（保持原逻辑）
             if (isResizeBR) {
                 const dx = e.clientX - resizeStartX;
                 const dy = e.clientY - resizeStartY;
@@ -249,29 +363,24 @@
                 newH = Math.max(MIN_H, Math.min(newH, window.innerHeight - panel.offsetTop - 10));
                 panel.style.width = newW + "px";
                 panel.style.height = newH + "px";
-                refreshVars();
+                requestAnimationFrame(refreshVars);
                 return;
             }
-
-            // 左下角缩放（修复方向）
             if (isResizeBL) {
                 const dx = e.clientX - resizeStartX;
                 const dy = e.clientY - resizeStartY;
                 let newW = initW - dx;
                 let newH = initH + dy;
                 let newLeft = initPanelLeft + dx;
-
-                // 宽度约束
                 if (newW >= MIN_W && newLeft >= 0) {
                     panel.style.width = newW + "px";
                     panel.style.left = newLeft + "px";
                 }
-                // 高度约束
                 if (newH >= MIN_H) {
                     newH = Math.min(newH, window.innerHeight - panel.offsetTop - 10);
                     panel.style.height = newH + "px";
                 }
-                refreshVars();
+                requestAnimationFrame(refreshVars);
             }
         });
 
@@ -286,16 +395,40 @@
             panel.style.display = isShow ? "block" : "none";
             btn.innerText = isShow ? "关闭面板" : "变量看板";
             panelVisible = isShow;
-            if (!isShow) {
-                changedCellSet.clear();
-                lastValueMap = {};
-            }
+            controlBtns.forEach(b => b.style.display = isShow ? "inline-block" : "none");
+            if (!isShow) { changedCellSet.clear(); lastValueMap = {}; }
             if (isShow) refreshVars();
         };
 
         window.addEventListener('resize', () => {
             if (panelVisible) refreshVars();
         });
+    }
+
+    function applyTheme() {
+        if (!panel) return;
+        const c = isDarkTheme ? themeColor.dark : themeColor.light;
+        panel.style.background = c.panelBg;
+        panel.style.borderColor = c.border;
+        titleBar.style.background = c.titleBarBg;
+        titleBar.style.color = c.titleText;
+        titleBar.style.borderColor = c.border;
+        resizeBL.style.background = c.resizeBg;
+        resizeBR.style.background = c.resizeBg;
+
+        // 搜索框主题适配
+        if (searchInput) {
+            if (isDarkTheme) {
+                searchInput.style.background = "#374151";
+                searchInput.style.color = "#fff";
+                searchInput.style.borderColor = "#4b5563";
+                searchInput.style.placeholderColor = "#9ca3af";
+            } else {
+                searchInput.style.background = "#fff";
+                searchInput.style.color = "#333";
+                searchInput.style.borderColor = "#ddd";
+            }
+        }
     }
 
     function sortByTypeAndName(list) {
@@ -306,10 +439,30 @@
         });
     }
 
+    // 变量过滤：根据搜索关键词筛选
+    function filterVariables(list) {
+        if (!searchKeyword) return list;
+        return list.filter(item => item.name.toLowerCase().includes(searchKeyword));
+    }
+
     function buildAutoColumnRows(list) {
         const colCnt = getAutoColumnCount();
         let rows = "";
         const total = list.length;
+        const c = isDarkTheme ? themeColor.dark : themeColor.light;
+        const changedText = "#ff4444";
+
+        const cellStyle = `
+            padding:6px;
+            border:1px solid ${c.cellBorder};
+            width:${(100 / colCnt).toFixed(2)}%;
+            font-size:${baseFontSize}px;
+            line-height:1.4;
+            word-break:break-all;
+            box-sizing:border-box;
+            color:${c.text};
+        `;
+
         for (let i = 0; i < total; i += colCnt) {
             rows += "<tr>";
             for (let j = 0; j < colCnt; j++) {
@@ -318,24 +471,21 @@
                     const key = item.key;
                     const currVal = item.value;
                     const lastVal = lastValueMap[key];
-                    let bgStyle = "";
-                    let textColor = "#ffffff";
+                    let bg = "";
+                    let color = c.text;
 
                     if (panelVisible && lastVal !== undefined && lastVal !== currVal) {
                         changedCellSet.add(key);
-                        textColor = "#ff4444";
+                        color = changedText;
                     }
                     lastValueMap[key] = currVal;
+                    if (changedCellSet.has(key)) bg = `background:${c.changeBg};`;
 
-                    if (changedCellSet.has(key)) {
-                        bgStyle = "background-color:#4b2828;";
-                    }
-
-                    rows += `<td style="padding:6px;border:1px solid #555;${bgStyle};flex:1;min-width:120px;word-break:break-all;">
-                        ${item.name}：<span style="color:${textColor};">${currVal}</span>
+                    rows += `<td style="${cellStyle}${bg}">
+                        ${item.name}：<span style="color:${color};">${currVal}</span>
                     </td>`;
                 } else {
-                    rows += `<td style="padding:6px;border:1px solid #555;color:#888;flex:1;min-width:120px;">-</td>`;
+                    rows += `<td style="${cellStyle}color:${c.emptyText};">-</td>`;
                 }
             }
             rows += "</tr>";
@@ -351,31 +501,34 @@
         getOfficialGlobalVars(vars => {
             let globalList = vars.filter(item => item.scope === 'global');
             let otherList = vars.filter(item => item.scope !== 'global');
+
+            // 执行搜索过滤
+            globalList = filterVariables(globalList);
+            otherList = filterVariables(otherList);
+
             globalList = sortByTypeAndName(globalList);
             otherList = sortByTypeAndName(otherList);
 
             const colCnt = getAutoColumnCount();
+            const c = isDarkTheme ? themeColor.dark : themeColor.light;
+
             let thHtml = "";
             for (let t = 1; t <= colCnt; t++) {
-                thHtml += `<th>${t}</th>`;
+                thHtml += `<th style="width:${(100 / colCnt).toFixed(2)}%;font-size:${baseFontSize}px;color:${c.text};">${t}</th>`;
             }
 
             let html = `
             <div style="margin-bottom:18px;">
-                <div style="margin:4px 0;font-weight:bold;color:#73c0ff;">一、全局变量</div>
-                <table width="100%" border="1" cellpadding="6" cellspacing="0" style="border-color:#555;table-layout:auto;">
-                    <tr style="background:#334;text-align:center;">
-                        ${thHtml}
-                    </tr>
+                <div style="margin:4px 0;font-weight:bold;color:${c.titleMark};font-size:${baseFontSize+1}px;">一、全局变量</div>
+                <table style="table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid ${c.cellBorder};">
+                    <tr style="background:${c.headBg};text-align:center;">${thHtml}</tr>
                     ${buildAutoColumnRows(globalList)}
                 </table>
             </div>
             <div>
-                <div style="margin:4px 0;font-weight:bold;color:#73c0ff;">二、非全局变量</div>
-                <table width="100%" border="1" cellpadding="6" cellspacing="0" style="border-color:#555;table-layout:auto;">
-                    <tr style="background:#334;text-align:center;">
-                        ${thHtml}
-                    </tr>
+                <div style="margin:4px 0;font-weight:bold;color:${c.titleMark};font-size:${baseFontSize+1}px;">二、非全局变量</div>
+                <table style="table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid ${c.cellBorder};">
+                    <tr style="background:${c.headBg};text-align:center;">${thHtml}</tr>
                     ${buildAutoColumnRows(otherList)}
                 </table>
             </div>`;
@@ -385,6 +538,6 @@
 
     setTimeout(() => {
         createUI();
-        setInterval(() => refreshVars(), 800);
+        setInterval(refreshVars, 800);
     }, 1200);
 })();
