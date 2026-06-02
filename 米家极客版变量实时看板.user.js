@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         米家极客版变量实时看板
 // @namespace    http://tampermonkey.net/
-// @version      2.3
-// @description  拖拽缩放+手动列数/字体+主题切换+搜索过滤，优化主题切换速度
+// @version      2.4
+// @description  拖拽缩放+手动列数/字体+主题切换+搜索过滤+自动化名称标注
 // @author       嗜血星空earth
 // @match        http://192.168.*/*
 // @match        http://*/*
@@ -38,10 +38,9 @@
     const MIN_FONT = 10;
     const MAX_FONT = 20;
 
-    // 搜索关键词
     let searchKeyword = '';
 
-    // 预定义两套主题色彩，快速取值
+    // 主题色
     const themeColor = {
         dark: {
             panelBg: "#1f2937",
@@ -54,7 +53,8 @@
             emptyText: "#888",
             changeBg: "#4b2828",
             headBg: "#334",
-            titleMark: "#73c0ff"
+            titleMark: "#73c0ff",
+            automationText: "#9ca3af" // 自动化名称灰色
         },
         light: {
             panelBg: "#ffffff",
@@ -67,9 +67,14 @@
             emptyText: "#aaa",
             changeBg: "#ffebee",
             headBg: "#f0f0f0",
-            titleMark: "#0066cc"
+            titleMark: "#0066cc",
+            automationText: "#666666"
         }
     };
+
+    // 缓存：自动化列表 + 名称映射
+    let ruleListCache = [];
+    let ruleNameMap = {};
 
     function getAutoColumnCount() {
         if (manualColumnCount !== null) return manualColumnCount;
@@ -88,6 +93,42 @@
         return { w, h, left, top };
     }
 
+    // ==============================================
+    // 【新增】获取所有自动化列表（用于名称映射）
+    // ==============================================
+    function loadRuleList(callback) {
+        const win = unsafeWindow;
+        if (!win.editor || !win.editor.gateway) {
+            ruleListCache = [];
+            ruleNameMap = {};
+            callback();
+            return;
+        }
+        win.editor.gateway.callAPI("getGraphList", {}, (res) => {
+            ruleListCache = res || [];
+            ruleNameMap = {};
+            ruleListCache.forEach(rule => {
+                if (rule.id && rule.userData?.name) {
+                    ruleNameMap[rule.id] = rule.userData.name;
+                }
+            });
+            callback();
+        });
+    }
+
+    // ==============================================
+    // 【新增】scope 转中文自动化名称
+    // ==============================================
+    function getScopeDisplayName(scope) {
+        if (scope === "global") return "全局变量";
+        if (!scope.startsWith("R")) return scope;
+        const ruleId = scope.replace("R", "");
+        return ruleNameMap[ruleId] || "未知自动化";
+    }
+
+    // ==============================================
+    // 原获取变量逻辑（增加自动化名称字段）
+    // ==============================================
     function getOfficialGlobalVars(callback) {
         const win = unsafeWindow;
         if (!win.editor || !win.editor.gateway) {
@@ -108,7 +149,8 @@
                             name: v.userData.name,
                             value: v.value,
                             type: v.type,
-                            key: scope + "_" + v.userData.name
+                            key: scope + "_" + v.userData.name,
+                            automationName: getScopeDisplayName(scope)
                         });
                     }
                     count--;
@@ -224,7 +266,6 @@
             border: 1px solid #444;
         `;
 
-        // 标题栏 + 搜索框容器
         titleBar = document.createElement('div');
         titleBar.style.cssText = `
             height: 36px !important;
@@ -242,7 +283,6 @@
         const titleText = document.createElement('span');
         titleText.innerText = "米家极客版变量实时看板  ©嗜血星空earth";
 
-        // 搜索输入框
         searchInput = document.createElement('input');
         searchInput.type = 'text';
         searchInput.placeholder = '搜索变量名...';
@@ -255,7 +295,6 @@
             font-size: 12px !important;
             width: 160px !important;
         `;
-        // 搜索输入实时刷新
         searchInput.addEventListener('input', () => {
             searchKeyword = searchInput.value.trim().toLowerCase();
             refreshVars();
@@ -307,7 +346,6 @@
         applyTheme();
 
         titleBar.addEventListener('mousedown', (e) => {
-            // 点击搜索框时不触发拖拽
             if (e.target === searchInput) return;
             isDragging = true;
             startX = e.clientX;
@@ -416,7 +454,6 @@
         resizeBL.style.background = c.resizeBg;
         resizeBR.style.background = c.resizeBg;
 
-        // 搜索框主题适配
         if (searchInput) {
             if (isDarkTheme) {
                 searchInput.style.background = "#374151";
@@ -439,12 +476,14 @@
         });
     }
 
-    // 变量过滤：根据搜索关键词筛选
     function filterVariables(list) {
         if (!searchKeyword) return list;
         return list.filter(item => item.name.toLowerCase().includes(searchKeyword));
     }
 
+    // ==============================================
+    // 渲染表格（增加灰色自动化名称）
+    // ==============================================
     function buildAutoColumnRows(list) {
         const colCnt = getAutoColumnCount();
         let rows = "";
@@ -481,7 +520,13 @@
                     lastValueMap[key] = currVal;
                     if (changedCellSet.has(key)) bg = `background:${c.changeBg};`;
 
+                    // 显示：灰色小字自动化名称 + 正常变量名
+                    const autoNameHtml = item.scope !== "global"
+                        ? `<div style="font-size:${baseFontSize-2}px;color:${c.automationText};margin-bottom:2px;">${item.automationName}</div>`
+                        : "";
+
                     rows += `<td style="${cellStyle}${bg}">
+                        ${autoNameHtml}
                         ${item.name}：<span style="color:${color};">${currVal}</span>
                     </td>`;
                 } else {
@@ -493,46 +538,49 @@
         return rows;
     }
 
+    // ==============================================
+    // 刷新：先加载自动化名称，再渲染变量
+    // ==============================================
     function refreshVars() {
         if (typeof document === 'undefined' || !panelVisible) return;
         const content = document.getElementById('var-list-content');
         if (!content) return;
 
-        getOfficialGlobalVars(vars => {
-            let globalList = vars.filter(item => item.scope === 'global');
-            let otherList = vars.filter(item => item.scope !== 'global');
+        loadRuleList(() => {
+            getOfficialGlobalVars(vars => {
+                let globalList = vars.filter(item => item.scope === 'global');
+                let otherList = vars.filter(item => item.scope !== 'global');
 
-            // 执行搜索过滤
-            globalList = filterVariables(globalList);
-            otherList = filterVariables(otherList);
+                globalList = filterVariables(globalList);
+                otherList = filterVariables(otherList);
+                globalList = sortByTypeAndName(globalList);
+                otherList = sortByTypeAndName(otherList);
 
-            globalList = sortByTypeAndName(globalList);
-            otherList = sortByTypeAndName(otherList);
+                const colCnt = getAutoColumnCount();
+                const c = isDarkTheme ? themeColor.dark : themeColor.light;
 
-            const colCnt = getAutoColumnCount();
-            const c = isDarkTheme ? themeColor.dark : themeColor.light;
+                let thHtml = "";
+                for (let t = 1; t <= colCnt; t++) {
+                    thHtml += `<th style="width:${(100 / colCnt).toFixed(2)}%;font-size:${baseFontSize}px;color:${c.text};">${t}</th>`;
+                }
 
-            let thHtml = "";
-            for (let t = 1; t <= colCnt; t++) {
-                thHtml += `<th style="width:${(100 / colCnt).toFixed(2)}%;font-size:${baseFontSize}px;color:${c.text};">${t}</th>`;
-            }
-
-            let html = `
-            <div style="margin-bottom:18px;">
-                <div style="margin:4px 0;font-weight:bold;color:${c.titleMark};font-size:${baseFontSize+1}px;">一、全局变量</div>
-                <table style="table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid ${c.cellBorder};">
-                    <tr style="background:${c.headBg};text-align:center;">${thHtml}</tr>
-                    ${buildAutoColumnRows(globalList)}
-                </table>
-            </div>
-            <div>
-                <div style="margin:4px 0;font-weight:bold;color:${c.titleMark};font-size:${baseFontSize+1}px;">二、非全局变量</div>
-                <table style="table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid ${c.cellBorder};">
-                    <tr style="background:${c.headBg};text-align:center;">${thHtml}</tr>
-                    ${buildAutoColumnRows(otherList)}
-                </table>
-            </div>`;
-            content.innerHTML = html;
+                let html = `
+                <div style="margin-bottom:18px;">
+                    <div style="margin:4px 0;font-weight:bold;color:${c.titleMark};font-size:${baseFontSize+1}px;">一、全局变量</div>
+                    <table style="table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid ${c.cellBorder};">
+                        <tr style="background:${c.headBg};text-align:center;">${thHtml}</tr>
+                        ${buildAutoColumnRows(globalList)}
+                    </table>
+                </div>
+                <div>
+                    <div style="margin:4px 0;font-weight:bold;color:${c.titleMark};font-size:${baseFontSize+1}px;">二、非全局变量</div>
+                    <table style="table-layout:fixed;width:100%;border-collapse:collapse;border:1px solid ${c.cellBorder};">
+                        <tr style="background:${c.headBg};text-align:center;">${thHtml}</tr>
+                        ${buildAutoColumnRows(otherList)}
+                    </table>
+                </div>`;
+                content.innerHTML = html;
+            });
         });
     }
 
