@@ -36,3 +36,6 @@ V2.3
 V2.4
 
 - 为非全局变量添加所属自动化标识，明确变量来源；
+
+注：
+为便于Greasy Fork更改文件名字为：mijia-geek-dashboard
