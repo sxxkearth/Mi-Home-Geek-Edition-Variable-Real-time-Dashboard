@@ -2,7 +2,7 @@
 // @name         米家极客版变量实时看板
 // @namespace    http://tampermonkey.net/
 // @version      2.4
-// @description  拖拽缩放+手动列数/字体+主题切换+搜索过滤+自动化名称标注
+// @description  实时查看变量变化，对发生变化及正在变化的变量及其值进行亮显，实现精准调试；
 // @author       嗜血星空earth
 // @match        http://192.168.*/*
 // @match        http://*/*
